@@ -42,17 +42,18 @@ struct announce_request_s {
     uint16_t port;
 } __attribute__((packed));
 
+struct peer_s {
+    uint32_t ip_address;
+    uint16_t port;
+} __attribute__((packed));
+
 struct announce_response_s {
     uint32_t action;
     uint32_t transaction_id;
     uint32_t interval;
     uint32_t leechers;
     uint32_t seeders;
-} __attribute__((packed));
-
-struct peer_s {
-    uint32_t ip_address;
-    uint16_t port;
+    struct peer_s peers[1];
 } __attribute__((packed));
 
 static void _sendto(int sockfd, const void* data, size_t size,
@@ -79,11 +80,22 @@ static ssize_t _recvfrom(int sockfd, void* data, size_t size,
     return read;
 }
 
+int htoi(char h)
+{
+    return h < 0x3A ? h - 0x30 : h - 0x57; 
+}
+
+void strhex(const char* str, uint8_t* out)
+{
+    for (unsigned i = 0; i < strlen(str) >> 1; i++)
+        out[i] = htoi(str[i<<1]) << 4 | htoi(str[i<<1|1]);
+}
+
 int main(int argc, char** argv)
 {
-    if (argc < 3)
+    if (argc < 4)
     {
-        fprintf(stderr, "%s <host> <port>\n", argv[0]);
+        fprintf(stderr, "%s <host> <port> <hash>\n", argv[0]);
         return 1;
     }
 
@@ -115,9 +127,10 @@ int main(int argc, char** argv)
 
     srand(time(NULL));
     uint64_t connection_id = INIT_CONNECTION_ID;
-    uint32_t transaction_id = rand();
-    printf("connect\ttransaction\t%u\n", transaction_id);
     {
+        uint32_t transaction_id = rand();
+        printf("connect\ttransaction\t%u\n", transaction_id);
+
         struct connect_request_s req = {
             .connection_id = __bswap_64(INIT_CONNECTION_ID),
             .action = __bswap_32(ACTION_CONNECT),
@@ -134,6 +147,51 @@ int main(int argc, char** argv)
             res.transaction_id, res.connection_id);
 
         connection_id = res.connection_id;
+    }
+
+    {
+        uint32_t transaction_id = rand();
+        printf("announce\ttransaction\t%u\n", transaction_id);
+
+        struct announce_request_s req = {
+            .connection_id = __bswap_64(connection_id),
+            .action = __bswap_32(ACTION_ANNOUNCE),
+            .transaction_id = __bswap_32(transaction_id),
+            .downloaded = __bswap_64(0),
+            .left = __bswap_64(0),
+            .uploaded = __bswap_64(0),
+            .event = __bswap_32(0),
+            .ip_address = INADDR_LOOPBACK,
+            .key = __bswap_32(0),
+            .numwant = __bswap_32(ANNOUNCE_NUMWANT),
+            .port = htons(10126)
+        };
+        for (unsigned i = 0; i < 20; i++)
+            req.peer_id[i] = rand() & 0xFF;
+        strhex(argv[3], req.info_hash);
+        _sendto(sockfd, &req, sizeof(req), paddr, addrlen);
+
+        uint8_t* packet = (uint8_t*)malloc(65536);
+        struct announce_response_s* res = (struct announce_response_s*)packet;
+        _recvfrom(sockfd, res, 65536, paddr, &addrlen);
+        res->action = __bswap_32(res->action);
+        res->transaction_id = __bswap_32(res->transaction_id);
+        res->interval = __bswap_32(res->interval);
+        res->leechers = __bswap_32(res->leechers);
+        res->seeders = __bswap_32(res->seeders);
+        printf("%u\t%u\t%u\t%u\t%u\n", res->action, res->transaction_id,
+            res->interval, res->leechers, res->seeders);
+        
+        unsigned count = res->leechers + res->seeders;
+        for (unsigned i = 0; i < count; i++)
+        {
+            struct peer_s* peer = &res->peers[i];
+            struct in_addr addr = {.s_addr = peer->ip_address};
+            unsigned port = ntohs(peer->port);
+            printf("%s\t%d\n", inet_ntoa(addr), port);
+        }
+
+        free(packet);
     }
 
     close(sockfd);
